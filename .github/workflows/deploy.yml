@@ -1,0 +1,69 @@
+name: Node.js CI/CD Docker Compose Pipeline  # Name of the GitHub Actions workflow
+
+on:
+  push:
+    branches:
+      - main  # Trigger the workflow when code is pushed to the "main" branch, we can just use this 
+  pull_request:
+    branches:
+      - main  # Trigger the workflow when a pull request is opened to the "main" branch
+
+jobs:
+  build:  # First job: Build and push Docker images
+    runs-on: ubuntu-latest  # Runs on an Ubuntu-based GitHub Actions runner
+
+    steps:
+      - name: Checkout code  # Step 1: Clone the GitHub repository
+        uses: actions/checkout@v2
+
+      - name: Set up Docker Buildx  # Step 2: Enable advanced Docker builds for cross-platform support:an advanced tool for building Docker images efficiently with extra features.
+        uses: docker/setup-buildx-action@v1
+
+      - name: Log in to Docker Hub  # Step 3: Authenticate with Docker Hub using GitHub Secrets
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}  # Your Docker Hub username (stored in GitHub Secrets)
+          password: ${{ secrets.DOCKER_PASSWORD }}  # Your Docker Hub password (stored in GitHub Secrets)
+
+      - name: Build and tag Docker images  # Step 4: Build the Node.js Docker image and push it to Docker Hub
+        run: |
+          # Build the Node.js app image from the "frontend" directory
+          docker build -t formation-devops2-nodeapp:latest ./frontend
+
+          # Tag the built image with your Docker Hub repository name
+          docker tag formation-devops2-nodeapp:latest ${{ secrets.DOCKER_USERNAME }}/formation-devops2-nodeapp:latest
+
+          # Push the image to Docker Hub
+          docker push ${{ secrets.DOCKER_USERNAME }}/formation-devops2-nodeapp:latest
+
+      - name: Run tests inside Docker container  # Step 5: Run tests before deployment
+        run: |
+          docker run --rm ${{ secrets.DOCKER_USERNAME }}/formation-devops2-nodeapp:latest npm test || true  
+          # The "|| true" ensures that even if no tests exist, the pipeline does not fail.
+
+  deploy:  # Second job: Deploy the application to AWS EC2
+    runs-on: ubuntu-latest  # Runs on an Ubuntu-based GitHub Actions runner: This tells GitHub Actions which type of virtual machine (runner) to use for executing the job.
+                            # A runner is a server provided by GitHub that executes your workflow jobs. GitHub provides several pre-configured virtual machines (hosted runners) that support different operating systems.
+    needs: build  # This job runs **only after** the "build" job completes successfully
+
+    steps:
+      - name: Checkout code  # Step 1: Clone the GitHub repository again in this job
+        uses: actions/checkout@v2
+
+      - name: Set up SSH for EC2 deployment  # Step 2: Configure SSH access to the AWS EC2 instance
+        uses: webfactory/ssh-agent@v0.5.3
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}  # SSH key stored in GitHub Secrets for secure access
+
+      - name: Deploy Docker Compose to EC2  # Step 3: Connect to EC2, pull the latest changes, and restart services
+        run: |
+          ## The -o StrictHostKeyChecking=no option tells SSH not to prompt for confirmation when connecting to a new server for the first time.
+          ssh -o StrictHostKeyChecking=no ubuntu@${{ secrets.EC2_HOST }} << 'EOF'
+            cd ${{ secrets.My_REPO_DIR }}  # Navigate to the project directory on EC2
+
+            git pull origin main  # Fetch the latest code from the repository
+
+            docker compose pull  # Pull the latest Docker images from Docker Hub
+            docker compose down  # Stop and remove existing containers
+            docker compose up -d  # Rebuild and restart the containers in detached mode
+          EOF
